@@ -352,7 +352,58 @@ def _format_expire_date_brt(exp_raw):
     except Exception:
         return str(exp_raw) if exp_raw else ''
 
-def schedule_subscription_recheck(root, label_var):
+def _normalize_expire_datetime(exp_raw):
+    """Converte a data de expiração em datetime com tz BRT."""
+    if not exp_raw:
+        return None
+    try:
+        tz_brt = timezone(timedelta(hours=-3))
+        s = str(exp_raw)
+        if 'T' not in s and len(s) == 10:
+            y, m, d = map(int, s.split('-'))
+            return datetime(y, m, d, 23, 59, 59, 999999, tzinfo=tz_brt)
+        dt = datetime.fromisoformat(s.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz_brt)
+        else:
+            dt = dt.astimezone(tz_brt)
+        return dt
+    except Exception:
+        return None
+
+def _format_subscription_status(exp_raw):
+    """Retorna (texto, cor) considerando dias restantes e data final."""
+    dt = _normalize_expire_datetime(exp_raw)
+    if not dt:
+        return "Assinatura: ativa (sem data)", "green"
+
+    tz_brt = timezone(timedelta(hours=-3))
+    now = datetime.now(tz_brt)
+    delta_days = int((dt - now).total_seconds() // 86400)
+    days_left = max(delta_days, 0)
+    date_str = dt.strftime('%d/%m/%Y')
+    if dt < now:
+        return f"Assinatura: expirada em {date_str} (faltam 0 dias)", "red"
+    color = "red" if days_left < 7 else "green"
+    suffix = "dia" if days_left == 1 else "dias"
+    return f"Assinatura: válida até {date_str} (faltam {days_left} {suffix})", color
+
+def _update_subscription_label(label_var, label_widget, exp_at):
+    try:
+        text, color = _format_subscription_status(exp_at)
+    except Exception:
+        text, color = ("Assinatura: ativa", "green")
+    try:
+        label_var.set(text)
+    except Exception:
+        pass
+    try:
+        if label_widget:
+            label_widget.config(fg=color)
+    except Exception:
+        pass
+
+def schedule_subscription_recheck(root, label_var, label_widget):
     try:
         # Intervalo configurável (minutos) via env; padrão 12 horas
         minutes = int(os.getenv('SUBS_RECHECK_MINUTES', str(12*60)))
@@ -370,8 +421,7 @@ def schedule_subscription_recheck(root, label_var):
                 root.destroy()
                 return
             # Atualiza label com data
-            if exp_at:
-                label_var.set(f"Assinatura: válida até {_format_expire_date_brt(exp_at)}")
+            _update_subscription_label(label_var, label_widget, exp_at)
         finally:
             try:
                 root.after(interval_ms, _check)
@@ -381,7 +431,7 @@ def schedule_subscription_recheck(root, label_var):
     # agenda primeira checagem
     root.after(interval_ms, _check)
 
-def periodic_recheck(root, label_var, minutes=60):
+def periodic_recheck(root, label_var, label_widget, minutes=60):
     """Revalida periodicamente apenas o status do cliente.
     Fecha a aplicação somente se o status estiver False. Ignora expiração/data.
     """
@@ -403,13 +453,7 @@ def periodic_recheck(root, label_var, minutes=60):
                     return
                 # status true => mantém aberto; tenta mostrar validade se conhecida
                 exp_at = _auth_session.get('expires_at')
-                if exp_at:
-                    try:
-                        label_var.set(f"Assinatura: válida até {_format_expire_date_brt(exp_at)}")
-                    except Exception:
-                        pass
-                else:
-                    label_var.set('Assinatura: ativa')
+                _update_subscription_label(label_var, label_widget, exp_at)
             else:
                 # Em caso de falha de rede ou erro HTTP, não fecha o app.
                 # Mantém o status anterior para evitar falsos positivos.
@@ -434,6 +478,8 @@ fechar_telas = True
 # Controla se deve clicar na tela após fechar (para evitar "último clique")
 clicar_apos_fechar = False
 Método_impressão_pdf = 1  # 1=ShellExecute, 2=PowerShell, 3=Automação, 4=SumatraPDF
+# Processamento Amazon (.rar com .zpl)
+imprimir_amazon = False
 
 # Função para enviar ZPL para a impressora padrão
 def send_to_printer(zpl_data):
@@ -697,6 +743,108 @@ def process_zip(zip_file_path):
     except Exception as e:
         print(f"Erro ao processar ZIP: {e}")
 
+def _extract_rar(rar_file_path, extract_dir):
+    """Tenta extrair RAR usando rarfile (se instalado) ou unrar/WinRAR."""
+    os.makedirs(extract_dir, exist_ok=True)
+    err_txt = None
+    # Tentativa 1: rarfile (python - depende de unrar backend)
+    try:
+        import rarfile
+        if rarfile.is_rarfile(rar_file_path):
+            with rarfile.RarFile(rar_file_path) as rf:
+                rf.extractall(extract_dir)
+            return True, None
+    except Exception as e:
+        err_txt = f"rarfile: {e}"
+
+    # Tentativa 2: unrar/WinRAR CLI
+    candidates = [
+        shutil.which("unrar"),
+        r"C:\\Program Files\\WinRAR\\UnRAR.exe",
+        r"C:\\Program Files\\WinRAR\\unrar.exe",
+        r"C:\\Program Files (x86)\\WinRAR\\UnRAR.exe",
+        r"C:\\Program Files (x86)\\WinRAR\\unrar.exe",
+    ]
+    for cand in candidates:
+        if not cand:
+            continue
+        if not os.path.exists(cand):
+            continue
+        try:
+            result = subprocess.run(
+                [cand, "x", "-y", rar_file_path, extract_dir],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                return True, None
+            err_txt = result.stderr or result.stdout or err_txt
+        except Exception as e:
+            err_txt = str(e)
+    return False, err_txt or "Nenhuma ferramenta para extrair RAR encontrada"
+
+def process_amazon_rar(rar_file_path):
+    """Processa RAR enviado pela Amazon: ignora PDF e imprime apenas o .zpl."""
+    global fechar_telas, clicar_apos_fechar
+    extract_dir = os.path.join(os.path.dirname(rar_file_path), 'temp_extract_amazon')
+    try:
+        ok, err = _extract_rar(rar_file_path, extract_dir)
+        if not ok:
+            print(f"Erro ao extrair RAR Amazon: {err}")
+            return
+
+        zpl_file = next(
+            (
+                os.path.join(root, file)
+                for root, _, files in os.walk(extract_dir)
+                for file in files
+                if file.lower().endswith(".zpl")
+            ),
+            None,
+        )
+
+        if not zpl_file:
+            print("RAR Amazon sem arquivo .zpl; nada a imprimir.")
+            return
+
+        try:
+            with open(zpl_file, "r", encoding="utf-8") as file:
+                content = file.read()
+        except Exception:
+            with open(zpl_file, "r", encoding="latin-1", errors="ignore") as file:
+                content = file.read()
+
+        send_to_printer(content)
+        print(f"Arquivo Amazon (.zpl) impresso: {zpl_file}")
+
+        # Limpa arquivos temporários
+        for root, _, files in os.walk(extract_dir, topdown=False):
+            for file in files:
+                try:
+                    os.remove(os.path.join(root, file))
+                except Exception:
+                    pass
+            try:
+                os.rmdir(root)
+            except Exception:
+                pass
+
+        time.sleep(0.5)
+        try:
+            os.remove(rar_file_path)
+        except Exception:
+            pass
+
+        # Só fecha telas se opção estiver ligada
+        if fechar_telas:
+            pyautogui.hotkey('ctrl', 'w')
+            time.sleep(0.8)
+            if clicar_apos_fechar:
+                pyautogui.click()
+    except Exception as e:
+        print(f"Erro ao processar RAR Amazon: {e}")
+
 # Função para processar arquivos .txt diretamente
 def process_txt(txt_file_path):
     global fechar_telas, clicar_apos_fechar
@@ -748,6 +896,11 @@ def toggle_clicar_apos_fechar(checkbox_var):
     global clicar_apos_fechar
     clicar_apos_fechar = checkbox_var.get()
 
+def toggle_imprimir_amazon(checkbox_var):
+    global imprimir_amazon
+    imprimir_amazon = checkbox_var.get()
+    print(f"Imprimir Amazon (.rar): {'ativado' if imprimir_amazon else 'desativado'}")
+
 
 # Função para alterar Método de impressão PDF
 def change_pdf_method(method_var, method_label):
@@ -767,7 +920,11 @@ def monitor_etiquetas_shopee(base_dir, status_label, log_text, select_button):
     global monitorando
     monitorando = True
     log_text.insert(tk.END, f"Monitorando a pasta: {base_dir}\n")
-    log_text.insert(tk.END, f"Tipos de arquivo suportados: ZIP, TXT (ZPL), PDF\n")
+    tipos_base = "ZIP, TXT (ZPL), PDF"
+    if imprimir_amazon:
+        tipos_base += ", RAR (Amazon)"
+    log_text.insert(tk.END, f"Tipos de arquivo suportados: {tipos_base}\n")
+    log_text.insert(tk.END, f"Imprimir Amazon (.rar): {'ativado' if imprimir_amazon else 'desativado'}\n")
     log_text.insert(tk.END, f"Método de impressão PDF: {Método_impressão_pdf}\n")
     if selected_printer_name:
         log_text.insert(tk.END, f"Impressora atual: {selected_printer_name}\n")
@@ -781,6 +938,14 @@ def monitor_etiquetas_shopee(base_dir, status_label, log_text, select_button):
 
             for file_name in os.listdir(base_dir):
                 file_path = os.path.join(base_dir, file_name)
+
+                # Processa RAR Amazon apenas quando ativado
+                if imprimir_amazon and file_name.lower().endswith('.rar'):
+                    status_label.config(text=f"Ativo - Processando RAR Amazon: {file_name}", fg="green")
+                    log_text.insert(tk.END, f"Processando RAR Amazon: {file_name}\n")
+                    log_text.yview(tk.END)
+                    process_amazon_rar(file_path)
+                    break
                 
                 # Verifica se o arquivo é ZIP
                 if file_name.endswith('.zip'):
@@ -921,6 +1086,17 @@ def main():
     )
     clicar_checkbox.pack(side=tk.LEFT, padx=10)
 
+    # Checkbox para ativar impressão Amazon (.rar)
+    amazon_var = tk.BooleanVar(value=imprimir_amazon)
+    amazon_checkbox = tk.Checkbutton(
+        first_row,
+        text="Imprimir Amazon (.rar)",
+        variable=amazon_var,
+        font=("Arial", 10),
+        command=lambda: toggle_imprimir_amazon(amazon_var)
+    )
+    amazon_checkbox.pack(side=tk.LEFT, padx=10)
+
     # Linha de status da assinatura
     subs_row = tk.Frame(control_frame)
     subs_row.pack(fill=tk.X, pady=2)
@@ -981,22 +1157,16 @@ def main():
     # Exibe validade e agenda rechecagem da assinatura
     try:
         exp_at = _auth_session.get("expires_at")
-        if exp_at:
-            subs_label_var.set(f"Assinatura: válida até {_format_expire_date_brt(exp_at)}")
-        else:
-            subs_label_var.set("Assinatura: ativa")
-        schedule_subscription_recheck(root, subs_label_var)
-        periodic_recheck(root, subs_label_var, minutes=int(os.getenv('SUBS_RECHECK_MINUTES', '60')))
+        _update_subscription_label(subs_label_var, subs_label, exp_at)
+        schedule_subscription_recheck(root, subs_label_var, subs_label)
+        periodic_recheck(root, subs_label_var, subs_label, minutes=int(os.getenv('SUBS_RECHECK_MINUTES', '60')))
     except Exception:
         pass
     
     # Atualiza label de assinatura com data do login
     try:
         exp_at = _auth_session.get("expires_at")
-        if exp_at:
-            subs_label_var.set(f"Assinatura: válida até {_format_expire_date_brt(exp_at)}")
-        else:
-            subs_label_var.set("Assinatura: ativa")
+        _update_subscription_label(subs_label_var, subs_label, exp_at)
     except Exception:
         pass
 

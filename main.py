@@ -4,6 +4,7 @@ import win32print
 import win32api
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from tkinter import simpledialog
 from tkinter import ttk
 import time
 import pyautogui
@@ -480,6 +481,111 @@ clicar_apos_fechar = False
 Método_impressão_pdf = 1  # 1=ShellExecute, 2=PowerShell, 3=Automação, 4=SumatraPDF
 # Processamento Amazon (.rar com .zpl)
 imprimir_amazon = False
+# Auto-checkout
+auto_checkout_ativo = False
+auto_checkout_segundos = 0.0
+auto_checkout_sku = ""
+# Referências da UI para avisos do auto-checkout
+ui_status_label = None
+ui_log_text = None
+ui_select_button = None
+
+
+def _get_printer_job_ids():
+    """Retorna IDs dos jobs atuais da impressora selecionada/padrão."""
+    try:
+        printer_name = selected_printer_name or win32print.GetDefaultPrinter()
+    except Exception:
+        printer_name = selected_printer_name
+    if not printer_name:
+        return set()
+
+    jobs = set()
+    handle = None
+    try:
+        handle = win32print.OpenPrinter(printer_name)
+        info = win32print.GetPrinter(handle, 2)
+        total_jobs = int(info.get("cJobs", 0)) if isinstance(info, dict) else 0
+        if total_jobs > 0:
+            for job in win32print.EnumJobs(handle, 0, total_jobs, 1):
+                try:
+                    jobs.add(int(job.get("JobId")))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    finally:
+        try:
+            if handle:
+                win32print.ClosePrinter(handle)
+        except Exception:
+            pass
+    return jobs
+
+
+def _detectar_nova_impressao_apos_enter(job_ids_antes, timeout_seg=6.0):
+    """Observa a fila por alguns segundos procurando novo JobId."""
+    fim = time.time() + timeout_seg
+    while time.time() < fim:
+        atuais = _get_printer_job_ids()
+        if atuais - job_ids_antes:
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def _desativar_auto_checkout_pedido_multi_item():
+    """Desativa auto-checkout e avisa no painel quando não houver nova impressão."""
+    global auto_checkout_ativo
+    auto_checkout_ativo = False
+    try:
+        if ui_status_label:
+            ui_status_label.config(
+                text="Ativo - PEDIDO COM MAIS DE UM ITEM (auto-checkout desativado)",
+                fg="red",
+            )
+    except Exception:
+        pass
+    try:
+        if ui_log_text:
+            ui_log_text.insert(tk.END, "PEDIDO COM MAIS DE UM ITEM (auto-checkout desativado)\n")
+            ui_log_text.yview(tk.END)
+    except Exception:
+        pass
+
+
+def executar_auto_checkout():
+    """Executa automação de checkout após envio para impressora."""
+    if not auto_checkout_ativo:
+        return True
+    try:
+        segundos = max(float(auto_checkout_segundos), 0.0)
+    except Exception:
+        print("Auto-checkout desativado na prática: segundos inválidos.")
+        return False
+
+    sku = str(auto_checkout_sku or "").strip()
+    if not sku:
+        print("Auto-checkout desativado na prática: SKU vazio.")
+        return False
+
+    try:
+        job_ids_antes = _get_printer_job_ids()
+        print(f"Auto-checkout: aguardando {segundos} segundos para SKU '{sku}'.")
+        time.sleep(segundos)
+        pyautogui.click()
+        time.sleep(0.5)
+        pyautogui.write(sku, interval=0.02)
+        pyautogui.press('enter')
+        if not _detectar_nova_impressao_apos_enter(job_ids_antes):
+            print("Auto-checkout sem nova impressão detectada: PEDIDO COM MAIS DE UM ITEM.")
+            _desativar_auto_checkout_pedido_multi_item()
+            return False
+        print("Auto-checkout executado com sucesso.")
+        return True
+    except Exception as e:
+        print(f"Erro no auto-checkout: {e}")
+        return False
 
 # Função para enviar ZPL para a impressora padrão
 def send_to_printer(zpl_data):
@@ -493,8 +599,10 @@ def send_to_printer(zpl_data):
         win32print.EndDocPrinter(printer_handle)
         win32print.ClosePrinter(printer_handle)
         print("Etiqueta ZPL enviada para a impressora.")
+        return True
     except Exception as e:
         print(f"Erro ao enviar etiqueta ZPL: {e}")
+        return False
 
 # Função para imprimir PDF usando diferentes Métodos
 def print_pdf_method_1(pdf_file_path):
@@ -649,7 +757,7 @@ def print_pdf(pdf_file_path):
     # Tenta o Método Selecionado primeiro
     if Método_impressão_pdf in methods:
         if methods[Método_impressão_pdf](pdf_file_path):
-            return
+            return True
     
     # Se o Método principal falhou, tenta os outros
     print(f"Método {Método_impressão_pdf} falhou. Tentando outros Métodos...")
@@ -658,10 +766,11 @@ def print_pdf(pdf_file_path):
             print(f"Tentando Método {method_num}...")
             if method_func(pdf_file_path):
                 print(f"Sucesso com Método {method_num}")
-                return
+                return True
     
     print("Todos os Métodos de impressão falharam!")
     messagebox.showerror("Erro", f"Não foi possível imprimir o PDF: {os.path.basename(pdf_file_path)}")
+    return False
 
 # Descoberta de suporte PDF
 def _find_sumatra_exe():
@@ -718,10 +827,14 @@ def process_zip(zip_file_path):
 
         if zpl_file:
             with open(zpl_file, 'r') as file:
-                send_to_printer(file.read())
+                sent_ok = send_to_printer(file.read())
+            if sent_ok:
+                executar_auto_checkout()
             os.remove(zpl_file)
         elif pdf_file:
-            print_pdf(pdf_file)
+            printed_ok = print_pdf(pdf_file)
+            if printed_ok:
+                executar_auto_checkout()
             os.remove(pdf_file)
 
         # Limpa a pasta temporária
@@ -815,8 +928,10 @@ def process_amazon_rar(rar_file_path):
             with open(zpl_file, "r", encoding="latin-1", errors="ignore") as file:
                 content = file.read()
 
-        send_to_printer(content)
-        print(f"Arquivo Amazon (.zpl) impresso: {zpl_file}")
+        sent_ok = send_to_printer(content)
+        if sent_ok:
+            executar_auto_checkout()
+            print(f"Arquivo Amazon (.zpl) impresso: {zpl_file}")
 
         # Limpa arquivos temporários
         for root, _, files in os.walk(extract_dir, topdown=False):
@@ -850,7 +965,9 @@ def process_txt(txt_file_path):
     global fechar_telas, clicar_apos_fechar
     try:
         with open(txt_file_path, 'r') as file:
-            send_to_printer(file.read())
+            sent_ok = send_to_printer(file.read())
+        if sent_ok:
+            executar_auto_checkout()
         os.remove(txt_file_path)
         print(f"Arquivo TXT processado: {txt_file_path}")
 
@@ -869,7 +986,9 @@ def process_txt(txt_file_path):
 def process_pdf(pdf_file_path):
     global fechar_telas, clicar_apos_fechar
     try:
-        print_pdf(pdf_file_path)
+        printed_ok = print_pdf(pdf_file_path)
+        if printed_ok:
+            executar_auto_checkout()
         os.remove(pdf_file_path)
         print(f"Arquivo PDF processado: {pdf_file_path}")
 
@@ -901,6 +1020,87 @@ def toggle_imprimir_amazon(checkbox_var):
     imprimir_amazon = checkbox_var.get()
     print(f"Imprimir Amazon (.rar): {'ativado' if imprimir_amazon else 'desativado'}")
 
+def _refresh_auto_checkout_status(status_label):
+    if not status_label:
+        return
+    if auto_checkout_ativo:
+        status_label.config(
+            text=f"Auto-checkout: Ativado ({auto_checkout_segundos}s | SKU: {auto_checkout_sku})",
+            fg="green",
+        )
+    else:
+        status_label.config(text="Auto-checkout: Desativado", fg="red")
+
+def toggle_auto_checkout(checkbox_var, root, notebook, auto_tab, status_label):
+    global auto_checkout_ativo, auto_checkout_segundos, auto_checkout_sku
+    auto_checkout_ativo = bool(checkbox_var.get())
+
+    if auto_checkout_ativo:
+        try:
+            segundos = simpledialog.askfloat(
+                "Auto-checkout",
+                "Quantos segundos esperar após enviar para a impressora?",
+                parent=root,
+                minvalue=0.0,
+            )
+        except Exception:
+            segundos = None
+        if segundos is None:
+            checkbox_var.set(False)
+            auto_checkout_ativo = False
+            _refresh_auto_checkout_status(status_label)
+            return
+
+        sku = simpledialog.askstring(
+            "Auto-checkout",
+            "Qual o código do produto (SKU)?",
+            parent=root,
+        )
+        sku = (sku or "").strip()
+        if not sku:
+            messagebox.showwarning("Auto-checkout", "SKU inválido. Auto-checkout não foi ativado.")
+            checkbox_var.set(False)
+            auto_checkout_ativo = False
+            _refresh_auto_checkout_status(status_label)
+            return
+
+        auto_checkout_segundos = float(segundos)
+        auto_checkout_sku = sku
+        try:
+            notebook.add(auto_tab, text="Auto-checkout")
+        except Exception:
+            pass
+        try:
+            notebook.select(auto_tab)
+        except Exception:
+            pass
+    else:
+        try:
+            notebook.hide(auto_tab)
+        except Exception:
+            pass
+
+    _refresh_auto_checkout_status(status_label)
+
+def salvar_auto_checkout(segundos_var, sku_var, status_label):
+    global auto_checkout_segundos, auto_checkout_sku
+    try:
+        segundos = float(str(segundos_var.get()).strip().replace(",", "."))
+        if segundos < 0:
+            raise ValueError("negativo")
+    except Exception:
+        messagebox.showwarning("Auto-checkout", "Informe um tempo válido (em segundos).")
+        return
+
+    sku = str(sku_var.get()).strip()
+    if not sku:
+        messagebox.showwarning("Auto-checkout", "Informe um SKU válido.")
+        return
+
+    auto_checkout_segundos = segundos
+    auto_checkout_sku = sku
+    _refresh_auto_checkout_status(status_label)
+    messagebox.showinfo("Auto-checkout", "Configuração salva.")
 
 # Função para alterar Método de impressão PDF
 def change_pdf_method(method_var, method_label):
@@ -1022,6 +1222,7 @@ def test_pdf_print():
 # Função principal
 def main():
     global stop_button, fechar_telas, Método_impressão_pdf
+    global ui_status_label, ui_log_text, ui_select_button
     
     root = tk.Tk()
     # Evita janela em branco enquanto exibe o login
@@ -1047,8 +1248,15 @@ def main():
     root.title("GAC - Monitor de Etiquetas (ZPL + PDF)")
     root.geometry("700x600")
 
+    notebook = ttk.Notebook(root)
+    notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+    main_tab = tk.Frame(notebook)
+    auto_tab = tk.Frame(notebook)
+    notebook.add(main_tab, text="Principal")
+
     # Frame para controles superiores
-    control_frame = tk.Frame(root)
+    control_frame = tk.Frame(main_tab)
     control_frame.pack(pady=10)
 
     # Primeira linha de controles
@@ -1096,6 +1304,26 @@ def main():
         command=lambda: toggle_imprimir_amazon(amazon_var)
     )
     amazon_checkbox.pack(side=tk.LEFT, padx=10)
+
+    # Checkbox para ativar auto-checkout
+    auto_checkout_var = tk.BooleanVar(value=auto_checkout_ativo)
+    auto_checkout_status_label = tk.Label(
+        first_row,
+        text="Auto-checkout: Desativado",
+        font=("Arial", 10),
+        fg="red"
+    )
+    auto_checkout_checkbox = tk.Checkbutton(
+        first_row,
+        text="Ativar auto-checkout",
+        variable=auto_checkout_var,
+        font=("Arial", 10),
+        command=lambda: toggle_auto_checkout(
+            auto_checkout_var, root, notebook, auto_tab, auto_checkout_status_label
+        )
+    )
+    auto_checkout_checkbox.pack(side=tk.LEFT, padx=10)
+    auto_checkout_status_label.pack(side=tk.LEFT, padx=10)
 
     # Linha de status da assinatura
     subs_row = tk.Frame(control_frame)
@@ -1206,34 +1434,81 @@ def main():
     test_button.pack(side=tk.LEFT, padx=10)
 
     # Separador visual
-    separator = tk.Frame(root, height=2, bg="gray")
+    separator = tk.Frame(main_tab, height=2, bg="gray")
     separator.pack(fill=tk.X, padx=20, pady=10)
 
     # Label de informações sobre tipos de arquivo
     info_label = tk.Label(
-        root, 
+        main_tab,
         text="Suporte a: ZIP, TXT (ZPL), PDF | Múltiplos Métodos de impressão PDF", 
         font=("Arial", 10), 
         fg="gray"
     )
     info_label.pack(pady=5)
 
-    status_label = tk.Label(root, text="Selecione uma pasta para monitorar", font=("Arial", 14), width=50)
+    status_label = tk.Label(main_tab, text="Selecione uma pasta para monitorar", font=("Arial", 14), width=50)
     status_label.pack(pady=20)
 
-    log_text = tk.Text(root, height=12, width=80, font=("Arial", 9), wrap=tk.WORD)
+    log_text = tk.Text(main_tab, height=12, width=80, font=("Arial", 9), wrap=tk.WORD)
     log_text.pack(pady=10)
 
     select_button = tk.Button(
-        root, text="Selecionar Pasta", font=("Arial", 12), bg="#4CAF50", fg="white", 
+        main_tab, text="Selecionar Pasta", font=("Arial", 12), bg="#4CAF50", fg="white",
         command=lambda: select_folder(status_label, log_text, select_button)
     )
     select_button.pack(pady=10)
 
     stop_button = tk.Button(
-        root, text="Parar Monitoramento", font=("Arial", 12), bg="#f44336", fg="white", 
+        main_tab, text="Parar Monitoramento", font=("Arial", 12), bg="#f44336", fg="white",
         command=lambda: stop_monitoramento(status_label, log_text, select_button)
     )
+
+    ui_status_label = status_label
+    ui_log_text = log_text
+    ui_select_button = select_button
+
+    # Aba Auto-checkout (aparece ao ativar a opção)
+    auto_cfg_frame = tk.Frame(auto_tab, padx=16, pady=16)
+    auto_cfg_frame.pack(fill=tk.BOTH, expand=True)
+    tk.Label(
+        auto_cfg_frame,
+        text="Configuração do Auto-checkout",
+        font=("Arial", 12, "bold")
+    ).pack(anchor="w", pady=(0, 10))
+
+    tk.Label(
+        auto_cfg_frame,
+        text="Segundos para esperar após enviar para impressora:",
+        font=("Arial", 10)
+    ).pack(anchor="w")
+    auto_seconds_var = tk.StringVar(value=str(auto_checkout_segundos))
+    tk.Entry(auto_cfg_frame, textvariable=auto_seconds_var, width=24).pack(anchor="w", pady=(2, 10))
+
+    tk.Label(
+        auto_cfg_frame,
+        text="Código do produto (SKU):",
+        font=("Arial", 10)
+    ).pack(anchor="w")
+    auto_sku_var = tk.StringVar(value=auto_checkout_sku)
+    tk.Entry(auto_cfg_frame, textvariable=auto_sku_var, width=24).pack(anchor="w", pady=(2, 10))
+
+    tk.Button(
+        auto_cfg_frame,
+        text="Salvar configuração",
+        font=("Arial", 10),
+        bg="#4CAF50",
+        fg="white",
+        command=lambda: salvar_auto_checkout(auto_seconds_var, auto_sku_var, auto_checkout_status_label),
+    ).pack(anchor="w", pady=(4, 10))
+
+    tk.Label(
+        auto_cfg_frame,
+        text="Fluxo: espera -> clique -> aguarda 0.5s -> digita SKU -> Enter",
+        font=("Arial", 9),
+        fg="gray",
+    ).pack(anchor="w")
+
+    _refresh_auto_checkout_status(auto_checkout_status_label)
 
     # Solicitar seleção de impressora ao abrir
     try:
@@ -1248,9 +1523,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
 
 
 

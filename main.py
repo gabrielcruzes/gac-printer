@@ -492,13 +492,16 @@ ui_select_button = None
 
 
 def _get_printer_job_ids():
-    """Retorna IDs dos jobs atuais da impressora selecionada/padrão."""
+    """Retorna IDs dos jobs atuais da impressora selecionada/padrão.
+
+    Retorna None quando não for possível consultar a fila.
+    """
     try:
         printer_name = selected_printer_name or win32print.GetDefaultPrinter()
     except Exception:
         printer_name = selected_printer_name
     if not printer_name:
-        return set()
+        return None
 
     jobs = set()
     handle = None
@@ -513,7 +516,7 @@ def _get_printer_job_ids():
                 except Exception:
                     pass
     except Exception:
-        pass
+        return None
     finally:
         try:
             if handle:
@@ -524,10 +527,20 @@ def _get_printer_job_ids():
 
 
 def _detectar_nova_impressao_apos_enter(job_ids_antes, timeout_seg=6.0):
-    """Observa a fila por alguns segundos procurando novo JobId."""
+    """Observa a fila por alguns segundos procurando novo JobId.
+
+    Retorna:
+    - True: encontrou nova impressão.
+    - False: não encontrou.
+    - None: fila indisponível para consulta.
+    """
+    if job_ids_antes is None:
+        return None
     fim = time.time() + timeout_seg
     while time.time() < fim:
         atuais = _get_printer_job_ids()
+        if atuais is None:
+            return None
         if atuais - job_ids_antes:
             return True
         time.sleep(0.25)
@@ -571,16 +584,23 @@ def executar_auto_checkout():
 
     try:
         job_ids_antes = _get_printer_job_ids()
-        print(f"Auto-checkout: aguardando {segundos} segundos para SKU '{sku}'.")
-        time.sleep(segundos)
         pyautogui.click()
-        time.sleep(0.5)
+        print(f"Auto-checkout: clique enviado; aguardando {segundos} segundos para SKU '{sku}'.")
+        time.sleep(segundos)
         pyautogui.write(sku, interval=0.02)
         pyautogui.press('enter')
-        if not _detectar_nova_impressao_apos_enter(job_ids_antes):
+        timeout_nova_impressao = max(12.0, segundos + 6.0)
+        nova_impressao = _detectar_nova_impressao_apos_enter(
+            job_ids_antes,
+            timeout_seg=timeout_nova_impressao,
+        )
+        if nova_impressao is False:
             print("Auto-checkout sem nova impressão detectada: PEDIDO COM MAIS DE UM ITEM.")
             _desativar_auto_checkout_pedido_multi_item()
             return False
+        if nova_impressao is None:
+            print("Auto-checkout: não foi possível consultar fila da impressora; mantendo ativo.")
+            return True
         print("Auto-checkout executado com sucesso.")
         return True
     except Exception as e:
@@ -1515,7 +1535,7 @@ def main():
 
     tk.Label(
         auto_cfg_frame,
-        text="Fluxo: espera -> clique -> aguarda 0.5s -> digita SKU -> Enter",
+        text="Fluxo: clique -> espera configurada -> digita SKU -> Enter",
         font=("Arial", 9),
         fg="gray",
     ).pack(anchor="w")
@@ -1535,8 +1555,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
 
 
 

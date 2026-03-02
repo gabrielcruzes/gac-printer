@@ -1036,36 +1036,48 @@ def toggle_auto_checkout(checkbox_var, root, notebook, auto_tab, status_label):
     auto_checkout_ativo = bool(checkbox_var.get())
 
     if auto_checkout_ativo:
+        # Reaproveita a última configuração válida; só pergunta se estiver faltando.
+        segundos_validos = None
         try:
-            segundos = simpledialog.askfloat(
-                "Auto-checkout",
-                "Quantos segundos esperar após enviar para a impressora?",
-                parent=root,
-                minvalue=0.0,
-            )
+            segundos_validos = float(auto_checkout_segundos)
+            if segundos_validos < 0:
+                raise ValueError("negativo")
         except Exception:
-            segundos = None
-        if segundos is None:
-            checkbox_var.set(False)
-            auto_checkout_ativo = False
-            _refresh_auto_checkout_status(status_label)
-            return
+            segundos_validos = None
 
-        sku = simpledialog.askstring(
-            "Auto-checkout",
-            "Qual o código do produto (SKU)?",
-            parent=root,
-        )
-        sku = (sku or "").strip()
-        if not sku:
-            messagebox.showwarning("Auto-checkout", "SKU inválido. Auto-checkout não foi ativado.")
-            checkbox_var.set(False)
-            auto_checkout_ativo = False
-            _refresh_auto_checkout_status(status_label)
-            return
+        sku_valido = str(auto_checkout_sku or "").strip()
 
-        auto_checkout_segundos = float(segundos)
-        auto_checkout_sku = sku
+        if segundos_validos is None or not sku_valido:
+            try:
+                segundos = simpledialog.askfloat(
+                    "Auto-checkout",
+                    "Quantos segundos esperar após enviar para a impressora?",
+                    parent=root,
+                    minvalue=0.0,
+                )
+            except Exception:
+                segundos = None
+            if segundos is None:
+                checkbox_var.set(False)
+                auto_checkout_ativo = False
+                _refresh_auto_checkout_status(status_label)
+                return
+
+            sku = simpledialog.askstring(
+                "Auto-checkout",
+                "Qual o código do produto (SKU)?",
+                parent=root,
+            )
+            sku = (sku or "").strip()
+            if not sku:
+                messagebox.showwarning("Auto-checkout", "SKU inválido. Auto-checkout não foi ativado.")
+                checkbox_var.set(False)
+                auto_checkout_ativo = False
+                _refresh_auto_checkout_status(status_label)
+                return
+
+            auto_checkout_segundos = float(segundos)
+            auto_checkout_sku = sku
         try:
             notebook.add(auto_tab, text="Auto-checkout")
         except Exception:
@@ -1246,7 +1258,7 @@ def main():
     except Exception:
         pass
     root.title("GAC - Monitor de Etiquetas (ZPL + PDF)")
-    root.geometry("700x600")
+    root.geometry("1300x650")
 
     notebook = ttk.Notebook(root)
     notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)

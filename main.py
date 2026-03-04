@@ -275,10 +275,7 @@ def show_login_dialog(root):
         if supabase_configured:
             ok, err, session = supabase_login(email, password)
         else:
-            if email == "admin" and password == "soeusei12345":
-                ok, session = True, {"access_token": "dev", "user": {"id": "dev"}}
-            else:
-                ok, err = False, "Ambiente sem Supabase configurado. Use admin/admin para testes."
+            ok, err = False, "Supabase não configurado. Verifique as variáveis de ambiente."
 
         if ok and session:
             _auth_session["access_token"] = session.get("access_token")
@@ -287,7 +284,7 @@ def show_login_dialog(root):
             _auth_session["email"] = email
 
             if supabase_configured:
-                ok_sub, sub_err, exp_at = supabase_check_subscription(_auth_session["access_token"], email)
+                ok_sub, sub_err, exp_at = supabase_check_subscription_rest(email, password)
                 if not ok_sub:
                     messagebox.showerror("Assinatura", sub_err or "Assinatura inválida")
                     status_lbl.config(text=sub_err or "Assinatura inválida", fg="red")
@@ -337,21 +334,10 @@ def show_login_dialog(root):
         return
 
 def _format_expire_date_brt(exp_raw):
-    try:
-        tz_brt = timezone(timedelta(hours=-3))
-        s = str(exp_raw)
-        if 'T' not in s and len(s) == 10:
-            y, m, d = map(int, s.split('-'))
-            dt = datetime(y, m, d, 23, 59, 59, 999999, tzinfo=tz_brt)
-        else:
-            dt = datetime.fromisoformat(s.replace('Z', '+00:00'))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=tz_brt)
-            else:
-                dt = dt.astimezone(tz_brt)
+    dt = _normalize_expire_datetime(exp_raw)
+    if dt:
         return dt.strftime('%d/%m/%Y')
-    except Exception:
-        return str(exp_raw) if exp_raw else ''
+    return str(exp_raw) if exp_raw else ''
 
 def _normalize_expire_datetime(exp_raw):
     """Converte a data de expiração em datetime com tz BRT."""
@@ -414,14 +400,16 @@ def schedule_subscription_recheck(root, label_var, label_widget):
 
     def _check():
         try:
-            if not _auth_session.get('access_token') or not _auth_session.get('email'):
+            email = _auth_session.get('email')
+            if not email:
                 return
-            ok, err, exp_at = supabase_check_subscription(_auth_session['access_token'], _auth_session['email'])
-            if not ok:
-                messagebox.showerror('Assinatura', err or 'Assinatura inválida/expirada')
+            ok, err, status_bool = supabase_check_status_only(email)
+            if ok and status_bool is False:
+                messagebox.showerror('Assinatura', err or 'Assinatura inativa/expirada')
                 root.destroy()
                 return
-            # Atualiza label com data
+            # Atualiza label com data de expiração conhecida
+            exp_at = _auth_session.get('expires_at')
             _update_subscription_label(label_var, label_widget, exp_at)
         finally:
             try:
@@ -467,13 +455,8 @@ def periodic_recheck(root, label_var, label_widget, minutes=60):
 
     root.after(interval_ms, _do)
 
-import json
-import urllib.request
-import urllib.error
-from datetime import datetime, timezone
-import platform
-
 # Variáveis globais
+_state_lock = threading.Lock()
 monitorando = False
 fechar_telas = True
 # Controla se deve clicar na tela após fechar (para evitar "último clique")
@@ -489,6 +472,51 @@ auto_checkout_sku = ""
 ui_status_label = None
 ui_log_text = None
 ui_select_button = None
+ui_auto_checkout_var = None
+ui_auto_checkout_status_label = None
+
+# ---- Persistência de configuração ----
+def _get_config_path():
+    if getattr(sys, 'frozen', False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, 'gac_config.json')
+
+def load_config():
+    """Carrega configurações salvas do arquivo JSON. Aplica nos globais."""
+    global fechar_telas, clicar_apos_fechar, imprimir_amazon
+    global Método_impressão_pdf, auto_checkout_segundos, auto_checkout_sku
+    try:
+        path = _get_config_path()
+        if not os.path.exists(path):
+            return
+        with open(path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        fechar_telas = bool(cfg.get('fechar_telas', fechar_telas))
+        clicar_apos_fechar = bool(cfg.get('clicar_apos_fechar', clicar_apos_fechar))
+        imprimir_amazon = bool(cfg.get('imprimir_amazon', imprimir_amazon))
+        Método_impressão_pdf = int(cfg.get('metodo_pdf', Método_impressão_pdf))
+        auto_checkout_segundos = float(cfg.get('auto_checkout_segundos', auto_checkout_segundos))
+        auto_checkout_sku = str(cfg.get('auto_checkout_sku', auto_checkout_sku))
+    except Exception as e:
+        print(f"Aviso: não foi possível carregar configuração: {e}")
+
+def save_config():
+    """Salva configurações atuais no arquivo JSON."""
+    try:
+        cfg = {
+            'fechar_telas': fechar_telas,
+            'clicar_apos_fechar': clicar_apos_fechar,
+            'imprimir_amazon': imprimir_amazon,
+            'metodo_pdf': Método_impressão_pdf,
+            'auto_checkout_segundos': auto_checkout_segundos,
+            'auto_checkout_sku': auto_checkout_sku,
+        }
+        with open(_get_config_path(), 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Aviso: não foi possível salvar configuração: {e}")
 
 
 def _get_printer_job_ids():
@@ -548,23 +576,116 @@ def _detectar_nova_impressao_apos_enter(job_ids_antes, timeout_seg=6.0):
 
 
 def _desativar_auto_checkout_pedido_multi_item():
-    """Desativa auto-checkout e avisa no painel quando não houver nova impressão."""
+    """Desativa auto-checkout e avisa no painel — nenhuma etiqueta gerada após Enter."""
     global auto_checkout_ativo
     auto_checkout_ativo = False
     try:
+        if ui_auto_checkout_var:
+            ui_auto_checkout_var.set(False)
+    except Exception:
+        pass
+    try:
         if ui_status_label:
             ui_status_label.config(
-                text="Ativo - PEDIDO COM MAIS DE UM ITEM (auto-checkout desativado)",
+                text="PEDIDO COM MAIS DE UM ITEM — auto-checkout desativado",
+                fg="red",
+            )
+    except Exception:
+        pass
+    try:
+        if ui_auto_checkout_status_label:
+            ui_auto_checkout_status_label.config(
+                text="Auto-checkout: Desativado (pedido multi-item)",
                 fg="red",
             )
     except Exception:
         pass
     try:
         if ui_log_text:
-            ui_log_text.insert(tk.END, "PEDIDO COM MAIS DE UM ITEM (auto-checkout desativado)\n")
+            ui_log_text.insert(tk.END, "⚠ PEDIDO COM MAIS DE UM ITEM — nenhuma etiqueta gerada após Enter. Auto-checkout desativado.\n")
             ui_log_text.yview(tk.END)
     except Exception:
         pass
+
+
+def reativar_auto_checkout():
+    """Reativa o auto-checkout após ter sido desativado por pedido multi-item."""
+    global auto_checkout_ativo
+    sku = str(auto_checkout_sku or "").strip()
+    if not sku:
+        try:
+            if ui_log_text:
+                ui_log_text.insert(tk.END, "⚠ Auto-checkout: configure o SKU antes de reativar.\n")
+                ui_log_text.yview(tk.END)
+        except Exception:
+            pass
+        return
+    auto_checkout_ativo = True
+    try:
+        if ui_auto_checkout_var:
+            ui_auto_checkout_var.set(True)
+    except Exception:
+        pass
+    try:
+        if ui_auto_checkout_status_label:
+            ui_auto_checkout_status_label.config(
+                text=f"Auto-checkout: Ativado ({auto_checkout_segundos}s | SKU: {sku})",
+                fg="green",
+            )
+    except Exception:
+        pass
+    try:
+        if ui_log_text:
+            ui_log_text.insert(tk.END, f"✓ Auto-checkout reativado (SKU: {sku}).\n")
+            ui_log_text.yview(tk.END)
+    except Exception:
+        pass
+
+
+def testar_auto_checkout():
+    """Testa o fluxo de auto-checkout em thread separada (aguarda 2s, digita SKU, Enter, verifica etiqueta)."""
+    def _run():
+        sku = str(auto_checkout_sku or "").strip()
+        if not sku:
+            try:
+                if ui_log_text:
+                    ui_log_text.insert(tk.END, "⚠ Teste auto-checkout: SKU não configurado.\n")
+                    ui_log_text.yview(tk.END)
+            except Exception:
+                pass
+            return
+        try:
+            if ui_log_text:
+                ui_log_text.insert(tk.END, f"→ Teste auto-checkout: iniciando em 2s (SKU: {sku})...\n")
+                ui_log_text.yview(tk.END)
+        except Exception:
+            pass
+        time.sleep(2.0)
+        try:
+            job_ids_antes = _get_printer_job_ids()
+            pyautogui.write(sku, interval=0.02)
+            pyautogui.press('enter')
+            nova_impressao = _detectar_nova_impressao_apos_enter(job_ids_antes, timeout_seg=3.0)
+            if nova_impressao is True:
+                msg = "✓ Teste auto-checkout: etiqueta detectada com sucesso.\n"
+            elif nova_impressao is False:
+                msg = "✗ Teste auto-checkout: nenhuma etiqueta em 3s (possível pedido multi-item).\n"
+            else:
+                msg = "? Teste auto-checkout: não foi possível consultar fila da impressora.\n"
+            try:
+                if ui_log_text:
+                    ui_log_text.insert(tk.END, msg)
+                    ui_log_text.yview(tk.END)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                if ui_log_text:
+                    ui_log_text.insert(tk.END, f"✗ Teste auto-checkout: erro — {e}\n")
+                    ui_log_text.yview(tk.END)
+            except Exception:
+                pass
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def executar_auto_checkout():
@@ -589,13 +710,12 @@ def executar_auto_checkout():
         time.sleep(segundos)
         pyautogui.write(sku, interval=0.02)
         pyautogui.press('enter')
-        timeout_nova_impressao = max(12.0, segundos + 6.0)
         nova_impressao = _detectar_nova_impressao_apos_enter(
             job_ids_antes,
-            timeout_seg=timeout_nova_impressao,
+            timeout_seg=3.0,
         )
         if nova_impressao is False:
-            print("Auto-checkout sem nova impressão detectada: PEDIDO COM MAIS DE UM ITEM.")
+            print("Auto-checkout: nenhuma etiqueta gerada em 3s — pedido com mais de um item. Desativando.")
             _desativar_auto_checkout_pedido_multi_item()
             return False
         if nova_impressao is None:
@@ -690,22 +810,9 @@ def print_pdf_method_3(pdf_file_path):
 def print_pdf_method_4(pdf_file_path):
     """Método 4: Usando SumatraPDF (se disponível)"""
     try:
-        # Procura pelo SumatraPDF em locais comuns
-        sumatra_paths = [
-            r"C:\Program Files\SumatraPDF\SumatraPDF.exe",
-            r"C:\Program Files (x86)\SumatraPDF\SumatraPDF.exe",
-            r"C:\Users\{}\AppData\Local\SumatraPDF\SumatraPDF.exe".format(os.getenv('USERNAME'))
-        ]
-        
-        sumatra_exe = None
-        for path in sumatra_paths:
-            if os.path.exists(path):
-                sumatra_exe = path
-                break
-        
+        sumatra_exe = _find_sumatra_exe()
         if sumatra_exe:
-            # Usa SumatraPDF para impressão silenciosa
-            subprocess.run([sumatra_exe, '-print-to-default', pdf_file_path], 
+            subprocess.run([sumatra_exe, '-print-to-default', pdf_file_path],
                          timeout=15, check=True)
             print(f"PDF impresso via SumatraPDF: {pdf_file_path}")
             time.sleep(2)
@@ -874,7 +981,14 @@ def process_zip(zip_file_path):
                 pyautogui.click()
 
     except Exception as e:
-        print(f"Erro ao processar ZIP: {e}")
+        msg = f"Erro ao processar ZIP: {e}"
+        print(msg)
+        try:
+            if ui_log_text:
+                ui_log_text.insert(tk.END, msg + "\n")
+                ui_log_text.yview(tk.END)
+        except Exception:
+            pass
 
 def _extract_rar(rar_file_path, extract_dir):
     """Tenta extrair RAR usando rarfile (se instalado) ou unrar/WinRAR."""
@@ -978,7 +1092,14 @@ def process_amazon_rar(rar_file_path):
             if clicar_apos_fechar:
                 pyautogui.click()
     except Exception as e:
-        print(f"Erro ao processar RAR Amazon: {e}")
+        msg = f"Erro ao processar RAR Amazon: {e}"
+        print(msg)
+        try:
+            if ui_log_text:
+                ui_log_text.insert(tk.END, msg + "\n")
+                ui_log_text.yview(tk.END)
+        except Exception:
+            pass
 
 # Função para processar arquivos .txt diretamente
 def process_txt(txt_file_path):
@@ -1000,7 +1121,14 @@ def process_txt(txt_file_path):
                 pyautogui.click()
 
     except Exception as e:
-        print(f"Erro ao processar TXT: {e}")
+        msg = f"Erro ao processar TXT: {e}"
+        print(msg)
+        try:
+            if ui_log_text:
+                ui_log_text.insert(tk.END, msg + "\n")
+                ui_log_text.yview(tk.END)
+        except Exception:
+            pass
 
 # Função para processar arquivos .pdf diretamente
 def process_pdf(pdf_file_path):
@@ -1021,7 +1149,14 @@ def process_pdf(pdf_file_path):
                 pyautogui.click()
 
     except Exception as e:
-        print(f"Erro ao processar PDF: {e}")
+        msg = f"Erro ao processar PDF: {e}"
+        print(msg)
+        try:
+            if ui_log_text:
+                ui_log_text.insert(tk.END, msg + "\n")
+                ui_log_text.yview(tk.END)
+        except Exception:
+            pass
 
 # Função para alternar o estado do fechamento de telas
 def toggle_fechar_telas(checkbox_var, status_fechar_label):
@@ -1030,15 +1165,18 @@ def toggle_fechar_telas(checkbox_var, status_fechar_label):
     status_text = "Ativado" if fechar_telas else "Desativado"
     color = "green" if fechar_telas else "red"
     status_fechar_label.config(text=f"Fechamento de telas: {status_text}", fg=color)
+    save_config()
 
 def toggle_clicar_apos_fechar(checkbox_var):
     global clicar_apos_fechar
     clicar_apos_fechar = checkbox_var.get()
+    save_config()
 
 def toggle_imprimir_amazon(checkbox_var):
     global imprimir_amazon
     imprimir_amazon = checkbox_var.get()
     print(f"Imprimir Amazon (.rar): {'ativado' if imprimir_amazon else 'desativado'}")
+    save_config()
 
 def _refresh_auto_checkout_status(status_label):
     if not status_label:
@@ -1131,6 +1269,7 @@ def salvar_auto_checkout(segundos_var, sku_var, status_label):
 
     auto_checkout_segundos = segundos
     auto_checkout_sku = sku
+    save_config()
     _refresh_auto_checkout_status(status_label)
     messagebox.showinfo("Auto-checkout", "Configuração salva.")
 
@@ -1140,12 +1279,13 @@ def change_pdf_method(method_var, method_label):
     Método_impressão_pdf = method_var.get()
     methods = {
         1: "ShellExecute",
-        2: "PowerShell", 
+        2: "PowerShell",
         3: "Automação",
         4: "SumatraPDF",
         5: "Ghostscript",
     }
     method_label.config(text=f"Método PDF: {methods[Método_impressão_pdf]}")
+    save_config()
 
 # Função para monitorar pastas
 def monitor_etiquetas_shopee(base_dir, status_label, log_text, select_button):
@@ -1168,8 +1308,20 @@ def monitor_etiquetas_shopee(base_dir, status_label, log_text, select_button):
             status_label.config(text=f"Buscando arquivos na pasta: {base_dir}", fg="blue")
             log_text.yview(tk.END)
 
-            for file_name in os.listdir(base_dir):
+            try:
+                arquivos = os.listdir(base_dir)
+            except Exception as e:
+                log_text.insert(tk.END, f"Erro ao listar pasta: {e}\n")
+                log_text.yview(tk.END)
+                time.sleep(3)
+                continue
+
+            for file_name in arquivos:
                 file_path = os.path.join(base_dir, file_name)
+
+                # Ignora arquivos que já foram removidos por iteração anterior
+                if not os.path.exists(file_path):
+                    continue
 
                 # Processa RAR Amazon apenas quando ativado
                 if imprimir_amazon and file_name.lower().endswith('.rar'):
@@ -1177,31 +1329,27 @@ def monitor_etiquetas_shopee(base_dir, status_label, log_text, select_button):
                     log_text.insert(tk.END, f"Processando RAR Amazon: {file_name}\n")
                     log_text.yview(tk.END)
                     process_amazon_rar(file_path)
-                    break
-                
+
                 # Verifica se o arquivo é ZIP
-                if file_name.endswith('.zip'):
+                elif file_name.endswith('.zip'):
                     status_label.config(text=f"Ativo - Processando ZIP: {file_name}", fg="green")
                     log_text.insert(tk.END, f"Processando ZIP: {file_name}\n")
                     log_text.yview(tk.END)
                     process_zip(file_path)
-                    break
-                
+
                 # Verifica se o arquivo é TXT (ZPL)
                 elif file_name.endswith('.txt'):
                     status_label.config(text=f"Ativo - Processando TXT: {file_name}", fg="green")
                     log_text.insert(tk.END, f"Processando TXT (ZPL): {file_name}\n")
                     log_text.yview(tk.END)
                     process_txt(file_path)
-                    break
-                
+
                 # Verifica se o arquivo é PDF
                 elif file_name.endswith('.pdf'):
                     status_label.config(text=f"Ativo - Processando PDF: {file_name}", fg="green")
                     log_text.insert(tk.END, f"Processando PDF: {file_name}\n")
                     log_text.yview(tk.END)
                     process_pdf(file_path)
-                    break
 
             time.sleep(3)
 
@@ -1255,7 +1403,10 @@ def test_pdf_print():
 def main():
     global stop_button, fechar_telas, Método_impressão_pdf
     global ui_status_label, ui_log_text, ui_select_button
-    
+    global ui_auto_checkout_var, ui_auto_checkout_status_label
+
+    load_config()
+
     root = tk.Tk()
     # Evita janela em branco enquanto exibe o login
     try:
@@ -1270,8 +1421,9 @@ def main():
     if not _auth_session.get("email"):
         try:
             root.destroy()
-        finally:
-            return
+        except Exception:
+            pass
+        return
     # Reexibe janela principal após login
     try:
         root.deiconify()
@@ -1498,6 +1650,8 @@ def main():
     ui_status_label = status_label
     ui_log_text = log_text
     ui_select_button = select_button
+    ui_auto_checkout_var = auto_checkout_var
+    ui_auto_checkout_status_label = auto_checkout_status_label
 
     # Aba Auto-checkout (aparece ao ativar a opção)
     auto_cfg_frame = tk.Frame(auto_tab, padx=16, pady=16)
@@ -1539,6 +1693,25 @@ def main():
         font=("Arial", 9),
         fg="gray",
     ).pack(anchor="w")
+
+    btn_row = tk.Frame(auto_cfg_frame)
+    btn_row.pack(anchor="w", pady=(12, 0))
+    tk.Button(
+        btn_row,
+        text="Reativar auto-checkout",
+        font=("Arial", 10),
+        bg="#2196F3",
+        fg="white",
+        command=reativar_auto_checkout,
+    ).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Button(
+        btn_row,
+        text="Testar auto-checkout",
+        font=("Arial", 10),
+        bg="#FF9800",
+        fg="white",
+        command=testar_auto_checkout,
+    ).pack(side=tk.LEFT)
 
     _refresh_auto_checkout_status(auto_checkout_status_label)
 

@@ -1,0 +1,8 @@
+{
+  "fechar_telas": true,
+  "clicar_apos_fechar": false,
+  "imprimir_amazon": false,
+  "metodo_pdf": 3,
+  "auto_checkout_segundos": 3.0,
+  "auto_checkout_sku": "7897660048878"
+}

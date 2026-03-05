@@ -248,15 +248,20 @@ def show_login_dialog(root):
     dlg.grab_set()
 
     tk.Label(dlg, text="E-mail:").pack(pady=(12, 2))
-    email_var = tk.StringVar()
+    email_var = tk.StringVar(value=last_login_email)
     email_entry = tk.Entry(dlg, textvariable=email_var, width=40)
     email_entry.pack()
-    email_entry.focus_set()
 
     tk.Label(dlg, text="Senha:").pack(pady=(8, 2))
     pass_var = tk.StringVar()
     pass_entry = tk.Entry(dlg, textvariable=pass_var, width=40, show="*")
     pass_entry.pack()
+
+    # Foca na senha se e-mail já está preenchido, senão foca no e-mail
+    if last_login_email:
+        pass_entry.focus_set()
+    else:
+        email_entry.focus_set()
 
     status_lbl = tk.Label(dlg, text="", fg="gray")
     status_lbl.pack(pady=8)
@@ -300,6 +305,7 @@ def show_login_dialog(root):
     btn_row = tk.Frame(dlg)
     btn_row.pack(pady=10)
     def do_login_rest():
+        global last_login_email
         email = email_var.get().strip()
         password = pass_var.get().strip()
         if not email or not password:
@@ -317,10 +323,15 @@ def show_login_dialog(root):
                 messagebox.showerror("Assinatura", sub_err or "Assinatura inválida")
                 status_lbl.config(text=sub_err or "Assinatura inválida", fg="red")
                 return
+            last_login_email = email
+            save_config()
             _auth_session["email"] = email
             _auth_session["senha"] = password
             _auth_session["expires_at"] = str(exp_at) if exp_at else None
             dlg.destroy()
+
+    pass_entry.bind("<Return>", lambda _: do_login_rest())
+    email_entry.bind("<Return>", lambda _: pass_entry.focus_set())
 
     tk.Button(btn_row, text="Entrar", bg="#4CAF50", fg="white", width=14, command=do_login_rest).pack(side=tk.LEFT, padx=6)
     # Aguarda o usuario finalizar o login antes de prosseguir
@@ -483,10 +494,13 @@ def _get_config_path():
         base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, 'gac_config.json')
 
+last_login_email = ""
+
 def load_config():
     """Carrega configurações salvas do arquivo JSON. Aplica nos globais."""
     global fechar_telas, clicar_apos_fechar, imprimir_amazon
     global Método_impressão_pdf, auto_checkout_segundos, auto_checkout_sku
+    global last_login_email
     try:
         path = _get_config_path()
         if not os.path.exists(path):
@@ -499,6 +513,7 @@ def load_config():
         Método_impressão_pdf = int(cfg.get('metodo_pdf', Método_impressão_pdf))
         auto_checkout_segundos = float(cfg.get('auto_checkout_segundos', auto_checkout_segundos))
         auto_checkout_sku = str(cfg.get('auto_checkout_sku', auto_checkout_sku))
+        last_login_email = str(cfg.get('last_login_email', ''))
     except Exception as e:
         print(f"Aviso: não foi possível carregar configuração: {e}")
 
@@ -512,6 +527,7 @@ def save_config():
             'metodo_pdf': Método_impressão_pdf,
             'auto_checkout_segundos': auto_checkout_segundos,
             'auto_checkout_sku': auto_checkout_sku,
+            'last_login_email': last_login_email,
         }
         with open(_get_config_path(), 'w', encoding='utf-8') as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)

@@ -479,6 +479,7 @@ imprimir_amazon = False
 auto_checkout_ativo = False
 auto_checkout_segundos = 0.0
 auto_checkout_sku = ""
+_auto_checkout_thread = None
 # Referências da UI para avisos do auto-checkout
 ui_status_label = None
 ui_log_text = None
@@ -656,6 +657,7 @@ def reativar_auto_checkout():
             ui_log_text.yview(tk.END)
     except Exception:
         pass
+    _start_auto_checkout_loop()
 
 
 def testar_auto_checkout():
@@ -704,44 +706,84 @@ def testar_auto_checkout():
     threading.Thread(target=_run, daemon=True).start()
 
 
-def executar_auto_checkout():
-    """Executa automação de checkout após envio para impressora."""
-    if not auto_checkout_ativo:
-        return True
+def _run_auto_checkout_loop():
+    """Loop contínuo de auto-checkout. Roda em thread daemon."""
+    def _log(msg):
+        print(msg)
+        try:
+            if ui_log_text:
+                ui_log_text.insert(tk.END, msg + "\n")
+                ui_log_text.yview(tk.END)
+        except Exception:
+            pass
+
+    _log("Auto-checkout: loop iniciado.")
+    while auto_checkout_ativo:
+        sku = str(auto_checkout_sku or "").strip()
+        if not sku:
+            _log("Auto-checkout: SKU vazio — loop encerrado.")
+            break
+        try:
+            segundos = max(float(auto_checkout_segundos), 0.0)
+        except Exception:
+            _log("Auto-checkout: segundos inválidos — loop encerrado.")
+            break
+        try:
+            job_ids_antes = _get_printer_job_ids()
+            pyautogui.click()
+            _log(f"Auto-checkout: aguardando {segundos}s para SKU '{sku}'.")
+            time.sleep(segundos)
+            if not auto_checkout_ativo:
+                break
+            pyautogui.write(sku, interval=0.02)
+            pyautogui.press('enter')
+            nova_impressao = _detectar_nova_impressao_apos_enter(
+                job_ids_antes,
+                timeout_seg=3.0,
+            )
+            if nova_impressao is False:
+                _log("Auto-checkout: nenhuma etiqueta em 3s — pedido multi-item. Pausando.")
+                _desativar_auto_checkout_pedido_multi_item()
+                break
+            if nova_impressao is None:
+                _log("Auto-checkout: fila indisponível; continuando.")
+            else:
+                _log("Auto-checkout: ciclo concluído com sucesso.")
+        except Exception as e:
+            _log(f"Auto-checkout: erro — {e}")
+            break
+    _log("Auto-checkout: loop encerrado.")
+
+
+def _start_auto_checkout_loop():
+    """Inicia o loop de auto-checkout em thread daemon (se não estiver rodando)."""
+    global _auto_checkout_thread
+    if _auto_checkout_thread and _auto_checkout_thread.is_alive():
+        return
+    _auto_checkout_thread = threading.Thread(target=_run_auto_checkout_loop, daemon=True)
+    _auto_checkout_thread.start()
+
+
+def pausar_auto_checkout():
+    """Pausa o loop de auto-checkout."""
+    global auto_checkout_ativo
+    auto_checkout_ativo = False
     try:
-        segundos = max(float(auto_checkout_segundos), 0.0)
+        if ui_auto_checkout_var:
+            ui_auto_checkout_var.set(False)
     except Exception:
-        print("Auto-checkout desativado na prática: segundos inválidos.")
-        return False
-
-    sku = str(auto_checkout_sku or "").strip()
-    if not sku:
-        print("Auto-checkout desativado na prática: SKU vazio.")
-        return False
-
+        pass
     try:
-        job_ids_antes = _get_printer_job_ids()
-        pyautogui.click()
-        print(f"Auto-checkout: clique enviado; aguardando {segundos} segundos para SKU '{sku}'.")
-        time.sleep(segundos)
-        pyautogui.write(sku, interval=0.02)
-        pyautogui.press('enter')
-        nova_impressao = _detectar_nova_impressao_apos_enter(
-            job_ids_antes,
-            timeout_seg=3.0,
-        )
-        if nova_impressao is False:
-            print("Auto-checkout: nenhuma etiqueta gerada em 3s — pedido com mais de um item. Desativando.")
-            _desativar_auto_checkout_pedido_multi_item()
-            return False
-        if nova_impressao is None:
-            print("Auto-checkout: não foi possível consultar fila da impressora; mantendo ativo.")
-            return True
-        print("Auto-checkout executado com sucesso.")
-        return True
-    except Exception as e:
-        print(f"Erro no auto-checkout: {e}")
-        return False
+        if ui_auto_checkout_status_label:
+            ui_auto_checkout_status_label.config(text="Auto-checkout: Pausado", fg="orange")
+    except Exception:
+        pass
+    try:
+        if ui_log_text:
+            ui_log_text.insert(tk.END, "⏸ Auto-checkout pausado pelo usuário.\n")
+            ui_log_text.yview(tk.END)
+    except Exception:
+        pass
 
 # Função para enviar ZPL para a impressora padrão
 def send_to_printer(zpl_data):
@@ -970,14 +1012,10 @@ def process_zip(zip_file_path):
 
         if zpl_file:
             with open(zpl_file, 'r') as file:
-                sent_ok = send_to_printer(file.read())
-            if sent_ok:
-                executar_auto_checkout()
+                send_to_printer(file.read())
             os.remove(zpl_file)
         elif pdf_file:
-            printed_ok = print_pdf(pdf_file)
-            if printed_ok:
-                executar_auto_checkout()
+            print_pdf(pdf_file)
             os.remove(pdf_file)
 
         # Limpa a pasta temporária
@@ -1078,10 +1116,8 @@ def process_amazon_rar(rar_file_path):
             with open(zpl_file, "r", encoding="latin-1", errors="ignore") as file:
                 content = file.read()
 
-        sent_ok = send_to_printer(content)
-        if sent_ok:
-            executar_auto_checkout()
-            print(f"Arquivo Amazon (.zpl) impresso: {zpl_file}")
+        send_to_printer(content)
+        print(f"Arquivo Amazon (.zpl) impresso: {zpl_file}")
 
         # Limpa arquivos temporários
         for root, _, files in os.walk(extract_dir, topdown=False):
@@ -1122,9 +1158,7 @@ def process_txt(txt_file_path):
     global fechar_telas, clicar_apos_fechar
     try:
         with open(txt_file_path, 'r') as file:
-            sent_ok = send_to_printer(file.read())
-        if sent_ok:
-            executar_auto_checkout()
+            send_to_printer(file.read())
         os.remove(txt_file_path)
         print(f"Arquivo TXT processado: {txt_file_path}")
 
@@ -1150,9 +1184,7 @@ def process_txt(txt_file_path):
 def process_pdf(pdf_file_path):
     global fechar_telas, clicar_apos_fechar
     try:
-        printed_ok = print_pdf(pdf_file_path)
-        if printed_ok:
-            executar_auto_checkout()
+        print_pdf(pdf_file_path)
         os.remove(pdf_file_path)
         print(f"Arquivo PDF processado: {pdf_file_path}")
 
@@ -1260,6 +1292,7 @@ def toggle_auto_checkout(checkbox_var, root, notebook, auto_tab, status_label):
             notebook.select(auto_tab)
         except Exception:
             pass
+        _start_auto_checkout_loop()
     else:
         try:
             notebook.hide(auto_tab)
@@ -1714,11 +1747,19 @@ def main():
     btn_row.pack(anchor="w", pady=(12, 0))
     tk.Button(
         btn_row,
-        text="Reativar auto-checkout",
+        text="▶ Reativar",
         font=("Arial", 10),
         bg="#2196F3",
         fg="white",
         command=reativar_auto_checkout,
+    ).pack(side=tk.LEFT, padx=(0, 6))
+    tk.Button(
+        btn_row,
+        text="⏸ Pausar",
+        font=("Arial", 10),
+        bg="#f44336",
+        fg="white",
+        command=pausar_auto_checkout,
     ).pack(side=tk.LEFT, padx=(0, 8))
     tk.Button(
         btn_row,

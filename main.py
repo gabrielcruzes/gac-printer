@@ -486,6 +486,7 @@ ui_log_text = None
 ui_select_button = None
 ui_auto_checkout_var = None
 ui_auto_checkout_status_label = None
+ui_checkout_toggle_button = None
 
 # ---- Persistência de configuração ----
 def _get_config_path():
@@ -617,6 +618,7 @@ def _desativar_auto_checkout_pedido_multi_item():
             )
     except Exception:
         pass
+    _update_checkout_toggle_button()
     try:
         if ui_log_text:
             ui_log_text.insert(tk.END, "⚠ PEDIDO COM MAIS DE UM ITEM — nenhuma etiqueta gerada após Enter. Auto-checkout desativado.\n")
@@ -657,6 +659,7 @@ def reativar_auto_checkout():
             ui_log_text.yview(tk.END)
     except Exception:
         pass
+    _update_checkout_toggle_button()
     _start_auto_checkout_loop()
 
 
@@ -680,14 +683,15 @@ def testar_auto_checkout():
             pass
         time.sleep(2.0)
         try:
+            timeout = max(float(auto_checkout_segundos), 1.0)
             job_ids_antes = _get_printer_job_ids()
             pyautogui.write(sku, interval=0.02)
             pyautogui.press('enter')
-            nova_impressao = _detectar_nova_impressao_apos_enter(job_ids_antes, timeout_seg=3.0)
+            nova_impressao = _detectar_nova_impressao_apos_enter(job_ids_antes, timeout_seg=timeout)
             if nova_impressao is True:
-                msg = "✓ Teste auto-checkout: etiqueta detectada com sucesso.\n"
+                msg = f"✓ Teste auto-checkout: etiqueta detectada com sucesso.\n"
             elif nova_impressao is False:
-                msg = "✗ Teste auto-checkout: nenhuma etiqueta em 3s (possível pedido multi-item).\n"
+                msg = f"✗ Teste auto-checkout: nenhuma etiqueta em {timeout}s (possível pedido multi-item).\n"
             else:
                 msg = "? Teste auto-checkout: não foi possível consultar fila da impressora.\n"
             try:
@@ -739,10 +743,10 @@ def _run_auto_checkout_loop():
             pyautogui.press('enter')
             nova_impressao = _detectar_nova_impressao_apos_enter(
                 job_ids_antes,
-                timeout_seg=3.0,
+                timeout_seg=segundos,
             )
             if nova_impressao is False:
-                _log("Auto-checkout: nenhuma etiqueta em 3s — pedido multi-item. Pausando.")
+                _log(f"Auto-checkout: nenhuma etiqueta em {segundos}s — pedido multi-item. Pausando.")
                 _desativar_auto_checkout_pedido_multi_item()
                 break
             if nova_impressao is None:
@@ -764,6 +768,30 @@ def _start_auto_checkout_loop():
     _auto_checkout_thread.start()
 
 
+def _update_checkout_toggle_button():
+    """Atualiza texto e cor do botão de toggle de checkout na tela principal."""
+    try:
+        if ui_checkout_toggle_button:
+            if auto_checkout_ativo:
+                ui_checkout_toggle_button.config(
+                    text="⏸ Checkout", bg="#FF9800"
+                )
+            else:
+                ui_checkout_toggle_button.config(
+                    text="▶ Checkout", bg="#2196F3"
+                )
+    except Exception:
+        pass
+
+
+def toggle_checkout_button():
+    """Chamado pelo botão de checkout na tela principal."""
+    if auto_checkout_ativo:
+        pausar_auto_checkout()
+    else:
+        reativar_auto_checkout()
+
+
 def pausar_auto_checkout():
     """Pausa o loop de auto-checkout."""
     global auto_checkout_ativo
@@ -778,6 +806,7 @@ def pausar_auto_checkout():
             ui_auto_checkout_status_label.config(text="Auto-checkout: Pausado", fg="orange")
     except Exception:
         pass
+    _update_checkout_toggle_button()
     try:
         if ui_log_text:
             ui_log_text.insert(tk.END, "⏸ Auto-checkout pausado pelo usuário.\n")
@@ -1237,69 +1266,6 @@ def _refresh_auto_checkout_status(status_label):
     else:
         status_label.config(text="Auto-checkout: Desativado", fg="red")
 
-def toggle_auto_checkout(checkbox_var, root, notebook, auto_tab, status_label):
-    global auto_checkout_ativo, auto_checkout_segundos, auto_checkout_sku
-    auto_checkout_ativo = bool(checkbox_var.get())
-
-    if auto_checkout_ativo:
-        # Reaproveita a última configuração válida; só pergunta se estiver faltando.
-        segundos_validos = None
-        try:
-            segundos_validos = float(auto_checkout_segundos)
-            if segundos_validos < 0:
-                raise ValueError("negativo")
-        except Exception:
-            segundos_validos = None
-
-        sku_valido = str(auto_checkout_sku or "").strip()
-
-        if segundos_validos is None or not sku_valido:
-            try:
-                segundos = simpledialog.askfloat(
-                    "Auto-checkout",
-                    "Quantos segundos esperar após enviar para a impressora?",
-                    parent=root,
-                    minvalue=0.0,
-                )
-            except Exception:
-                segundos = None
-            if segundos is None:
-                checkbox_var.set(False)
-                auto_checkout_ativo = False
-                _refresh_auto_checkout_status(status_label)
-                return
-
-            sku = simpledialog.askstring(
-                "Auto-checkout",
-                "Qual o código do produto (SKU)?",
-                parent=root,
-            )
-            sku = (sku or "").strip()
-            if not sku:
-                messagebox.showwarning("Auto-checkout", "SKU inválido. Auto-checkout não foi ativado.")
-                checkbox_var.set(False)
-                auto_checkout_ativo = False
-                _refresh_auto_checkout_status(status_label)
-                return
-
-            auto_checkout_segundos = float(segundos)
-            auto_checkout_sku = sku
-        try:
-            notebook.add(auto_tab, text="Auto-checkout")
-        except Exception:
-            pass
-        try:
-            notebook.select(auto_tab)
-        except Exception:
-            pass
-        _start_auto_checkout_loop()
-    else:
-        try:
-            notebook.hide(auto_tab)
-        except Exception:
-            pass
-
-    _refresh_auto_checkout_status(status_label)
 
 def salvar_auto_checkout(segundos_var, sku_var, status_label):
     global auto_checkout_segundos, auto_checkout_sku
@@ -1421,7 +1387,7 @@ def select_folder(status_label, log_text, select_button):
     folder_path = filedialog.askdirectory(title="Selecione a pasta a ser monitorada")
     if folder_path:
         status_label.config(text="Ativo", fg="green")
-        stop_button.pack(pady=10)
+        stop_button.pack(side=tk.LEFT, padx=6)
         threading.Thread(
             target=monitor_etiquetas_shopee, 
             args=(folder_path, status_label, log_text, select_button), 
@@ -1452,7 +1418,7 @@ def test_pdf_print():
 def main():
     global stop_button, fechar_telas, Método_impressão_pdf
     global ui_status_label, ui_log_text, ui_select_button
-    global ui_auto_checkout_var, ui_auto_checkout_status_label
+    global ui_auto_checkout_var, ui_auto_checkout_status_label, ui_checkout_toggle_button
 
     load_config()
 
@@ -1487,6 +1453,7 @@ def main():
     main_tab = tk.Frame(notebook)
     auto_tab = tk.Frame(notebook)
     notebook.add(main_tab, text="Principal")
+    notebook.add(auto_tab, text="Auto-checkout")
 
     # Frame para controles superiores
     control_frame = tk.Frame(main_tab)
@@ -1538,25 +1505,9 @@ def main():
     )
     amazon_checkbox.pack(side=tk.LEFT, padx=10)
 
-    # Checkbox para ativar auto-checkout
+    # BooleanVar para manter sincronismo interno do auto-checkout
     auto_checkout_var = tk.BooleanVar(value=auto_checkout_ativo)
-    auto_checkout_status_label = tk.Label(
-        first_row,
-        text="Auto-checkout: Desativado",
-        font=("Arial", 10),
-        fg="red"
-    )
-    auto_checkout_checkbox = tk.Checkbutton(
-        first_row,
-        text="Ativar auto-checkout",
-        variable=auto_checkout_var,
-        font=("Arial", 10),
-        command=lambda: toggle_auto_checkout(
-            auto_checkout_var, root, notebook, auto_tab, auto_checkout_status_label
-        )
-    )
-    auto_checkout_checkbox.pack(side=tk.LEFT, padx=10)
-    auto_checkout_status_label.pack(side=tk.LEFT, padx=10)
+    auto_checkout_status_label = None  # será criado na aba Auto-checkout
 
     # Linha de status da assinatura
     subs_row = tk.Frame(control_frame)
@@ -1685,31 +1636,49 @@ def main():
     log_text = tk.Text(main_tab, height=12, width=80, font=("Arial", 9), wrap=tk.WORD)
     log_text.pack(pady=10)
 
+    btn_main_row = tk.Frame(main_tab)
+    btn_main_row.pack(pady=10)
+
     select_button = tk.Button(
-        main_tab, text="Selecionar Pasta", font=("Arial", 12), bg="#4CAF50", fg="white",
+        btn_main_row, text="Selecionar Pasta", font=("Arial", 12), bg="#4CAF50", fg="white",
         command=lambda: select_folder(status_label, log_text, select_button)
     )
-    select_button.pack(pady=10)
+    select_button.pack(side=tk.LEFT, padx=6)
 
     stop_button = tk.Button(
-        main_tab, text="Parar Monitoramento", font=("Arial", 12), bg="#f44336", fg="white",
+        btn_main_row, text="Parar Monitoramento", font=("Arial", 12), bg="#f44336", fg="white",
         command=lambda: stop_monitoramento(status_label, log_text, select_button)
     )
+
+    checkout_btn = tk.Button(
+        btn_main_row, text="▶ Checkout", font=("Arial", 12), bg="#2196F3", fg="white",
+        command=toggle_checkout_button,
+    )
+    checkout_btn.pack(side=tk.LEFT, padx=6)
 
     ui_status_label = status_label
     ui_log_text = log_text
     ui_select_button = select_button
     ui_auto_checkout_var = auto_checkout_var
-    ui_auto_checkout_status_label = auto_checkout_status_label
+    ui_checkout_toggle_button = checkout_btn
 
-    # Aba Auto-checkout (aparece ao ativar a opção)
+    # Aba Auto-checkout
     auto_cfg_frame = tk.Frame(auto_tab, padx=16, pady=16)
     auto_cfg_frame.pack(fill=tk.BOTH, expand=True)
     tk.Label(
         auto_cfg_frame,
         text="Configuração do Auto-checkout",
         font=("Arial", 12, "bold")
-    ).pack(anchor="w", pady=(0, 10))
+    ).pack(anchor="w", pady=(0, 4))
+
+    auto_checkout_status_label = tk.Label(
+        auto_cfg_frame,
+        text="Auto-checkout: Desativado",
+        font=("Arial", 10),
+        fg="red",
+    )
+    auto_checkout_status_label.pack(anchor="w", pady=(0, 10))
+    ui_auto_checkout_status_label = auto_checkout_status_label
 
     tk.Label(
         auto_cfg_frame,

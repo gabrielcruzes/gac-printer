@@ -22,7 +22,7 @@ missing module named posix - imported by os (conditional, optional), posixpath (
 missing module named resource - imported by posix (top-level)
 missing module named _frozen_importlib_external - imported by importlib._bootstrap (delayed), importlib (optional), importlib.abc (optional), zipimport (top-level)
 excluded module named _frozen_importlib - imported by importlib (optional), importlib.abc (optional), zipimport (top-level)
-missing module named 'collections.abc' - imported by tracemalloc (top-level), typing (top-level), traceback (top-level), _colorize (top-level), logging (top-level), selectors (top-level), http.client (top-level), importlib.resources.readers (top-level), inspect (top-level), pyautogui (conditional), asyncio.base_events (top-level), multiprocessing.managers (top-level), asyncio.coroutines (top-level), _pyrepl.types (top-level)
+missing module named 'collections.abc' - imported by _colorize (top-level), typing (top-level), traceback (top-level), logging (top-level), selectors (top-level), http.client (top-level), importlib.resources.readers (top-level), tracemalloc (top-level), inspect (top-level), pyautogui (conditional), asyncio.base_events (top-level), multiprocessing.managers (top-level), asyncio.coroutines (top-level), _pyrepl.types (top-level)
 missing module named multiprocessing.BufferTooShort - imported by multiprocessing (top-level), multiprocessing.connection (top-level)
 missing module named multiprocessing.AuthenticationError - imported by multiprocessing (top-level), multiprocessing.forkserver (top-level), multiprocessing.connection (top-level)
 missing module named _posixsubprocess - imported by subprocess (conditional), multiprocessing.util (delayed)

@@ -749,7 +749,8 @@ def _run_auto_checkout_loop():
             _log(f"Auto-checkout: SKU '{sku}' enviado; aguardando impressão (até {segundos}s).")
             if not auto_checkout_ativo:
                 break
-            imprimiu = _etiqueta_impressa_event.wait(timeout=segundos)
+            time.sleep(2)
+            imprimiu = _etiqueta_impressa_event.wait(timeout=max(segundos - 2, 1.0))
             if not imprimiu:
                 _log(f"Auto-checkout: nenhuma etiqueta em {segundos}s — pedido multi-item. Pausando.")
                 _desativar_auto_checkout_pedido_multi_item()

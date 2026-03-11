@@ -723,6 +723,13 @@ def _run_auto_checkout_loop():
             pass
 
     _log("Auto-checkout: loop iniciado.")
+    try:
+        _inicial = max(float(auto_checkout_segundos), 0.0)
+    except Exception:
+        _inicial = 0.0
+    if _inicial > 0:
+        _log(f"Auto-checkout: aguardando {_inicial}s para iniciar...")
+        time.sleep(_inicial)
     while auto_checkout_ativo:
         sku = str(auto_checkout_sku or "").strip()
         if not sku:

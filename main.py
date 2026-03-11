@@ -741,9 +741,9 @@ def _run_auto_checkout_loop():
             _log("Auto-checkout: segundos inválidos — loop encerrado.")
             break
         try:
-            job_ids_antes = _get_printer_job_ids()
             pyautogui.click()
             pyautogui.write(sku, interval=0.02)
+            job_ids_antes = _get_printer_job_ids()
             pyautogui.press('enter')
             _log(f"Auto-checkout: SKU '{sku}' enviado; aguardando impressão ({segundos}s).")
             if not auto_checkout_ativo:

@@ -480,6 +480,7 @@ auto_checkout_ativo = False
 auto_checkout_segundos = 0.0
 auto_checkout_sku = ""
 _auto_checkout_thread = None
+_etiqueta_impressa_event = threading.Event()  # sinalizado após cada impressão
 # Referências da UI para avisos do auto-checkout
 ui_status_label = None
 ui_log_text = None
@@ -741,25 +742,19 @@ def _run_auto_checkout_loop():
             _log("Auto-checkout: segundos inválidos — loop encerrado.")
             break
         try:
+            _etiqueta_impressa_event.clear()
             pyautogui.click()
             pyautogui.write(sku, interval=0.02)
-            job_ids_antes = _get_printer_job_ids()
             pyautogui.press('enter')
-            _log(f"Auto-checkout: SKU '{sku}' enviado; aguardando impressão ({segundos}s).")
+            _log(f"Auto-checkout: SKU '{sku}' enviado; aguardando impressão (até {segundos}s).")
             if not auto_checkout_ativo:
                 break
-            nova_impressao = _detectar_nova_impressao_apos_enter(
-                job_ids_antes,
-                timeout_seg=segundos,
-            )
-            if nova_impressao is False:
+            imprimiu = _etiqueta_impressa_event.wait(timeout=segundos)
+            if not imprimiu:
                 _log(f"Auto-checkout: nenhuma etiqueta em {segundos}s — pedido multi-item. Pausando.")
                 _desativar_auto_checkout_pedido_multi_item()
                 break
-            if nova_impressao is None:
-                _log("Auto-checkout: fila indisponível; continuando.")
-            else:
-                _log("Auto-checkout: ciclo concluído com sucesso.")
+            _log("Auto-checkout: ciclo concluído com sucesso.")
         except Exception as e:
             _log(f"Auto-checkout: erro — {e}")
             break
@@ -833,6 +828,7 @@ def send_to_printer(zpl_data):
         win32print.EndDocPrinter(printer_handle)
         win32print.ClosePrinter(printer_handle)
         print("Etiqueta ZPL enviada para a impressora.")
+        _etiqueta_impressa_event.set()
         return True
     except Exception as e:
         print(f"Erro ao enviar etiqueta ZPL: {e}")
@@ -978,8 +974,9 @@ def print_pdf(pdf_file_path):
     # Tenta o Método Selecionado primeiro
     if Método_impressão_pdf in methods:
         if methods[Método_impressão_pdf](pdf_file_path):
+            _etiqueta_impressa_event.set()
             return True
-    
+
     # Se o Método principal falhou, tenta os outros
     print(f"Método {Método_impressão_pdf} falhou. Tentando outros Métodos...")
     for method_num, method_func in methods.items():
@@ -987,8 +984,9 @@ def print_pdf(pdf_file_path):
             print(f"Tentando Método {method_num}...")
             if method_func(pdf_file_path):
                 print(f"Sucesso com Método {method_num}")
+                _etiqueta_impressa_event.set()
                 return True
-    
+
     print("Todos os Métodos de impressão falharam!")
     messagebox.showerror("Erro", f"Não foi possível imprimir o PDF: {os.path.basename(pdf_file_path)}")
     return False

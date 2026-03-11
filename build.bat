@@ -6,12 +6,7 @@ if "%~1"=="--clean" (
   if exist dist  rmdir /s /q dist
 )
 
-where pyinstaller >nul 2>&1
-if errorlevel 1 (
-  echo PyInstaller nao encontrado no PATH. Usando ^"py -m PyInstaller^".
-)
-
-py -m PyInstaller --noconfirm --clean main.spec
+C:\Python314\python.exe -m PyInstaller --noconfirm --clean main.spec
 set ERR=%ERRORLEVEL%
 if not %ERR%==0 (
   echo Erro ao compilar. Codigo: %ERR%

@@ -685,6 +685,7 @@ def testar_auto_checkout():
         try:
             timeout = max(float(auto_checkout_segundos), 1.0)
             job_ids_antes = _get_printer_job_ids()
+            pyautogui.click()
             pyautogui.write(sku, interval=0.02)
             pyautogui.press('enter')
             nova_impressao = _detectar_nova_impressao_apos_enter(job_ids_antes, timeout_seg=timeout)
@@ -735,12 +736,11 @@ def _run_auto_checkout_loop():
         try:
             job_ids_antes = _get_printer_job_ids()
             pyautogui.click()
-            _log(f"Auto-checkout: aguardando {segundos}s para SKU '{sku}'.")
-            time.sleep(segundos)
-            if not auto_checkout_ativo:
-                break
             pyautogui.write(sku, interval=0.02)
             pyautogui.press('enter')
+            _log(f"Auto-checkout: SKU '{sku}' enviado; aguardando impressão ({segundos}s).")
+            if not auto_checkout_ativo:
+                break
             nova_impressao = _detectar_nova_impressao_apos_enter(
                 job_ids_antes,
                 timeout_seg=segundos,

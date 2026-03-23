@@ -1033,22 +1033,25 @@ def process_zip(zip_file_path):
         with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
             zip_ref.extractall(extract_dir)
 
-        # Procura por arquivos TXT (ZPL) primeiro
+        # Procura por arquivos .zpl primeiro, depois .txt, depois .pdf
         zpl_file = next(
-            (os.path.join(root, file) for root, _, files in os.walk(extract_dir) for file in files if file.endswith('.txt')),
+            (os.path.join(root, file) for root, _, files in os.walk(extract_dir) for file in files if file.lower().endswith('.zpl')),
             None
         )
-
-        # Se não encontrou TXT, procura por PDF
+        txt_file = next(
+            (os.path.join(root, file) for root, _, files in os.walk(extract_dir) for file in files if file.lower().endswith('.txt')),
+            None
+        )
         pdf_file = next(
-            (os.path.join(root, file) for root, _, files in os.walk(extract_dir) for file in files if file.endswith('.pdf')),
+            (os.path.join(root, file) for root, _, files in os.walk(extract_dir) for file in files if file.lower().endswith('.pdf')),
             None
         )
 
-        if zpl_file:
-            with open(zpl_file, 'r') as file:
+        label_file = zpl_file or txt_file
+        if label_file:
+            with open(label_file, 'r') as file:
                 send_to_printer(file.read())
-            os.remove(zpl_file)
+            os.remove(label_file)
         elif pdf_file:
             print_pdf(pdf_file)
             os.remove(pdf_file)
@@ -1358,10 +1361,10 @@ def monitor_etiquetas_shopee(base_dir, status_label, log_text, select_button):
                     log_text.yview(tk.END)
                     process_zip(file_path)
 
-                # Verifica se o arquivo é TXT (ZPL)
-                elif file_name.endswith('.txt'):
-                    status_label.config(text=f"Ativo - Processando TXT: {file_name}", fg="green")
-                    log_text.insert(tk.END, f"Processando TXT (ZPL): {file_name}\n")
+                # Verifica se o arquivo é TXT ou ZPL (etiqueta ZPL)
+                elif file_name.endswith('.txt') or file_name.lower().endswith('.zpl'):
+                    status_label.config(text=f"Ativo - Processando etiqueta: {file_name}", fg="green")
+                    log_text.insert(tk.END, f"Processando etiqueta (ZPL): {file_name}\n")
                     log_text.yview(tk.END)
                     process_txt(file_path)
 
